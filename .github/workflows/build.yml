@@ -1,0 +1,109 @@
+name: Build LarrkMod Tweak
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Compile LarrkMod.dylib
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Inspect iOS SDK Environment
+        run: |
+          echo "Xcode Developer Directory:"
+          xcode-select -p
+          echo "iOS SDK Path:"
+          xcrun -sdk iphoneos --show-sdk-path
+          echo "iOS SDK Version:"
+          xcrun -sdk iphoneos --show-sdk-version
+
+      - name: Compile LarrkMod.dylib (arm64)
+        run: |
+          SDK_PATH=$(xcrun -sdk iphoneos --show-sdk-path)
+          xcrun -sdk iphoneos clang++ \
+            -dynamiclib \
+            -arch arm64 \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min=14.0 \
+            -fobjc-arc \
+            -framework UIKit \
+            -framework Foundation \
+            -framework QuartzCore \
+            -framework CoreGraphics \
+            -framework AudioToolbox \
+            -Wl,-install_name,@executable_path/Frameworks/LarrkMod.dylib \
+            -O2 \
+            src/*.mm \
+            -o LarrkMod.dylib
+
+      - name: Ad-Hoc Sign Binary & Verify
+        run: |
+          codesign -f -s - LarrkMod.dylib
+          echo "--- Binary File Info ---"
+          file LarrkMod.dylib
+          echo "--- Linked Mach-O Libraries ---"
+          otool -L LarrkMod.dylib
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LarrkMod.dylib
+          path: LarrkMod.dylib
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Create or Update GitHub Release (v1.0.0)
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: v1.0.0
+          name: "LarrkMod v1.0.0 for Swiftgram"
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: false
+          body: |
+            ### ⚡ LarrkMod iOS Tweak for Swiftgram (`app.swiftgram.ios`)
+            
+            Автоматическая облачная сборка динамической библиотеки `LarrkMod.dylib` (архитектура `arm64`, чистый Objective-C++ без сторонних зависимостей).
+            
+            #### 🚀 Возможности твика:
+            - **Анти-Удаление сообщений:** удаленные сообщения сохраняются в переписке и выделяются полупрозрачным стилем (`alpha = 0.45`).
+            - **Ghost Mode (8 статусов):**
+              - Отключение Онлайн-Статуса (`account.updateStatus offline`)
+              - Отключение статуса ввода текста (Typing)
+              - Отключение статусов записи и загрузки видео / кружочков
+              - Отключение статусов записи и отправки голосовых сообщений
+              - Отключение статусов отправки фото и файлов
+            - **Локальный Telegram Premium:** клиентская разблокировка звездочки в профиле и премиум-функций.
+            - **Локальный NFT-профиль:** кастомный NFT-бейдж (`Pool Float`, `Plush Pepe`, `Durov's Cap`, `Astral Shard` или кастомное фото), выбор неонового градиента шапки и паттерн-эмодзи.
+            - **Локальные Telegram Stars ⭐:** визуальная подмена баланса звезд во всех экранах Telegram.
+            
+            #### 📱 Активация меню в приложении:
+            1. Откройте Swiftgram.
+            2. Зажмите область таббара на вкладке **«Чаты»**.
+            3. Через 1 секунду появится неоновый HUD с ползунком `"Удерживайте еще 3 сек для LarrkMod..."`.
+            4. Удерживайте палец до 100% — меню откроется с виброоткликом!
+            
+            #### 🛠 Инжект через Sideloadly:
+            1. Скачайте `.ipa` Swiftgram и прикрепленный файл `LarrkMod.dylib`.
+            2. Откройте **Sideloadly** и перетащите в него `.ipa`.
+            3. Разверните **Advanced Options** -> **Dylibs / Frameworks**.
+            4. Добавьте `LarrkMod.dylib` (метод инжекта: Cydia Substrate / Substitute / Pure Dylib).
+            5. Нажмите **Start** и установите готовое приложение на iPhone.
+          files: |
+            LarrkMod.dylib
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

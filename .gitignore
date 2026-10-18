@@ -1,0 +1,35 @@
+# Build and binary files
+*.dylib
+*.o
+*.a
+*.framework
+*.ipa
+build/
+DerivedData/
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows system files
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# Xcode
+*.mode1v3
+*.mode2v3
+*.moved-aside
+*.pbxuser
+*.perspectivev3
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*~
