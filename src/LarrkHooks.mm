@@ -8,10 +8,12 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <Security/Security.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
 
+#import "fishhook.h"
 #import "LarrkConfig.h"
 #import "LarrkGestureOverlay.h"
 #import "LarrkModViewController.h"
@@ -30,37 +32,7 @@ static const uint32_t TL_CONSTRUCTOR_SEND_MESSAGE_UPLOAD_FILE    = 0xaa0cd9e4;
 static const uint32_t TL_CONSTRUCTOR_SEND_MESSAGE_CANCEL         = 0xfd5ec8f5;
 static const uint32_t TL_CONSTRUCTOR_ACCOUNT_UPDATE_STATUS       = 0x6628f585;
 
-#pragma mark - Dynamic Runtime Utilities
-
-static Class LarrkFindClassByNameOrSuffix(const char *nameOrSuffix) {
-    if (!nameOrSuffix) return Nil;
-    
-    // Direct lookup first (O(1))
-    Class cls = objc_getClass(nameOrSuffix);
-    if (cls) return cls;
-    
-    // Scan loaded classes only once to avoid repeated expensive scans
-    static Class *allLoadedClasses = NULL;
-    static int loadedClassCount = 0;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        loadedClassCount = objc_getClassList(NULL, 0);
-        if (loadedClassCount > 0) {
-            allLoadedClasses = (Class *)malloc(sizeof(Class) * loadedClassCount);
-            loadedClassCount = objc_getClassList(allLoadedClasses, loadedClassCount);
-        }
-    });
-    
-    if (allLoadedClasses && loadedClassCount > 0) {
-        for (int i = 0; i < loadedClassCount; i++) {
-            const char *className = class_getName(allLoadedClasses[i]);
-            if (className && (strstr(className, nameOrSuffix) != NULL)) {
-                return allLoadedClasses[i];
-            }
-        }
-    }
-    return Nil;
-}
+#pragma mark - Runtime Swizzling Utilities
 
 static BOOL LarrkSwizzle(Class cls, SEL origSEL, IMP newIMP, IMP *outOrigIMP) {
     if (!cls || !origSEL || !newIMP) return NO;
@@ -82,46 +54,121 @@ static BOOL LarrkSwizzle(Class cls, SEL origSEL, IMP newIMP, IMP *outOrigIMP) {
     return YES;
 }
 
-#pragma mark - Sideload Fix (AppGroup Container & NSUserDefaults Suite)
+static BOOL LarrkSwizzleClassMethod(Class cls, SEL origSEL, IMP newIMP, IMP *outOrigIMP) {
+    if (!cls || !origSEL || !newIMP) return NO;
+    Class metaClass = object_getClass((id)cls);
+    return LarrkSwizzle(metaClass, origSEL, newIMP, outOrigIMP);
+}
+
+#pragma mark - 1. Bundle & FCAlertView Crash Protection (SIGABRT Fix)
+
+static IMP orig_NSBundle_bundleWithURL = NULL;
+static id hooked_NSBundle_bundleWithURL(id self, SEL _cmd, NSURL *url) {
+    if (!url) return nil;
+    if (orig_NSBundle_bundleWithURL) {
+        return ((id(*)(id, SEL, NSURL *))orig_NSBundle_bundleWithURL)(self, _cmd, url);
+    }
+    return nil;
+}
+
+static IMP orig_NSBundle_bundleWithPath = NULL;
+static id hooked_NSBundle_bundleWithPath(id self, SEL _cmd, NSString *path) {
+    if (!path || path.length == 0) return nil;
+    if (orig_NSBundle_bundleWithPath) {
+        return ((id(*)(id, SEL, NSString *))orig_NSBundle_bundleWithPath)(self, _cmd, path);
+    }
+    return nil;
+}
+
+static IMP orig_NSBundle_initWithURL = NULL;
+static id hooked_NSBundle_initWithURL(id self, SEL _cmd, NSURL *url) {
+    if (!url) return nil;
+    if (orig_NSBundle_initWithURL) {
+        return ((id(*)(id, SEL, NSURL *))orig_NSBundle_initWithURL)(self, _cmd, url);
+    }
+    return nil;
+}
+
+static IMP orig_NSBundle_initWithPath = NULL;
+static id hooked_NSBundle_initWithPath(id self, SEL _cmd, NSString *path) {
+    if (!path || path.length == 0) return nil;
+    if (orig_NSBundle_initWithPath) {
+        return ((id(*)(id, SEL, NSString *))orig_NSBundle_initWithPath)(self, _cmd, path);
+    }
+    return nil;
+}
+
+// FCAlertView dummy stubs to prevent third-party alert crashes
+static void dummy_FCAlertView_showAlert(id self, SEL _cmd, ...) {
+    NSLog(@"[LarrkMod] [FCAlertViewFix] Blocked FCAlertView presentation.");
+}
+
+static void dummy_FCAlertView_drawRect(id self, SEL _cmd, CGRect rect) {
+    // Suppress drawing
+}
+
+static UIImage *dummy_FCAlertView_loadImage(id self, SEL _cmd, NSString *name) {
+    return nil;
+}
+
+static void LarrkInstallBundleCrashFix(void) {
+    Class bundleClass = [NSBundle class];
+    
+    // Class methods on NSBundle
+    LarrkSwizzleClassMethod(bundleClass, @selector(bundleWithURL:), (IMP)hooked_NSBundle_bundleWithURL, &orig_NSBundle_bundleWithURL);
+    LarrkSwizzleClassMethod(bundleClass, @selector(bundleWithPath:), (IMP)hooked_NSBundle_bundleWithPath, &orig_NSBundle_bundleWithPath);
+    
+    // Instance methods on NSBundle
+    LarrkSwizzle(bundleClass, @selector(initWithURL:), (IMP)hooked_NSBundle_initWithURL, &orig_NSBundle_initWithURL);
+    LarrkSwizzle(bundleClass, @selector(initWithPath:), (IMP)hooked_NSBundle_initWithPath, &orig_NSBundle_initWithPath);
+    
+    // FCAlertView hook
+    Class fcAlertClass = NSClassFromString(@"FCAlertView");
+    if (fcAlertClass) {
+        SEL sel1 = NSSelectorFromString(@"showAlertInView:withTitle:withSubtitle:withCustomImage:withDoneButtonTitle:andButtons:");
+        SEL sel2 = NSSelectorFromString(@"showAlertWithTitle:withSubtitle:withCustomImage:withDoneButtonTitle:andButtons:");
+        SEL selDraw = @selector(drawRect:);
+        SEL selLoadImg = NSSelectorFromString(@"loadImageFromResourceBundle:");
+        
+        if (class_getInstanceMethod(fcAlertClass, sel1)) {
+            LarrkSwizzle(fcAlertClass, sel1, (IMP)dummy_FCAlertView_showAlert, NULL);
+        }
+        if (class_getInstanceMethod(fcAlertClass, sel2)) {
+            LarrkSwizzle(fcAlertClass, sel2, (IMP)dummy_FCAlertView_showAlert, NULL);
+        }
+        if (class_getInstanceMethod(fcAlertClass, selDraw)) {
+            LarrkSwizzle(fcAlertClass, selDraw, (IMP)dummy_FCAlertView_drawRect, NULL);
+        }
+        if (class_getInstanceMethod(fcAlertClass, selLoadImg)) {
+            LarrkSwizzle(fcAlertClass, selLoadImg, (IMP)dummy_FCAlertView_loadImage, NULL);
+        }
+        NSLog(@"[LarrkMod] [FCAlertViewFix] Injected FCAlertView neutralizers.");
+    }
+}
+
+#pragma mark - 2 & 4. AppGroup & NSUserDefaults Sideload Fix (Black Screen Fix)
 
 static IMP orig_NSFileManager_containerURL = NULL;
 static NSURL *hooked_NSFileManager_containerURL(id self, SEL _cmd, NSString *groupIdentifier) {
-    NSURL *url = nil;
-    if (orig_NSFileManager_containerURL) {
-        url = ((NSURL *(*)(id, SEL, NSString *))orig_NSFileManager_containerURL)(self, _cmd, groupIdentifier);
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsPath = paths.firstObject;
+    NSString *appGroupPath = [documentsPath stringByAppendingPathComponent:@"AppGroup/telegram-data"];
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:appGroupPath isDirectory:&isDir]) {
+        [fm createDirectoryAtPath:appGroupPath withIntermediateDirectories:YES attributes:nil error:nil];
     }
-    
-    // If running in environment with valid App Group entitlements (e.g. paid developer certificate), return it
-    if (url) {
-        return url;
-    }
-    
-    // Fallback for sideloaded environment (jailed / free Apple ID / modified Bundle ID)
-    static NSURL *appGroupURL = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        NSString *documentsPath = paths.firstObject;
-        NSString *groupDir = [documentsPath stringByAppendingPathComponent:@"AppGroup"];
-        
-        NSFileManager *fm = [NSFileManager defaultManager];
-        BOOL isDir = NO;
-        if (![fm fileExistsAtPath:groupDir isDirectory:&isDir]) {
-            [fm createDirectoryAtPath:groupDir withIntermediateDirectories:YES attributes:nil error:nil];
-        }
-        appGroupURL = [NSURL fileURLWithPath:groupDir isDirectory:YES];
-        NSLog(@"[LarrkMod] [SideloadFix] Initialized fallback AppGroup directory at: %@", groupDir);
-    });
-    
-    NSLog(@"[LarrkMod] [SideloadFix] Redirected containerURL for group '%@' -> %@", groupIdentifier, appGroupURL.path);
-    return appGroupURL;
+    return [NSURL fileURLWithPath:appGroupPath isDirectory:YES];
 }
 
 static IMP orig_NSUserDefaults_initWithSuiteName = NULL;
 static id hooked_NSUserDefaults_initWithSuiteName(id self, SEL _cmd, NSString *suiteName) {
-    if (suiteName && ([suiteName hasPrefix:@"group."] || [suiteName containsString:@"group."])) {
-        NSLog(@"[LarrkMod] [SideloadFix] Redirected NSUserDefaults suite '%@' -> standardUserDefaults", suiteName);
-        return [NSUserDefaults standardUserDefaults];
+    if (suiteName != nil) {
+        NSString *lower = [suiteName lowercaseString];
+        if ([lower hasPrefix:@"group."] || [lower containsString:@"swiftgram"] || [lower containsString:@"telegram"]) {
+            return [NSUserDefaults standardUserDefaults];
+        }
     }
     
     id res = nil;
@@ -135,14 +182,9 @@ static id hooked_NSUserDefaults_initWithSuiteName(id self, SEL _cmd, NSString *s
 }
 
 static void LarrkInstallSideloadFix(void) {
-    NSLog(@"[LarrkMod] [SideloadFix] Installing AppGroup & NSUserDefaults fixes...");
-    
-    // 1. Swizzle -[NSFileManager containerURLForSecurityApplicationGroupIdentifier:]
     Class fmClass = [NSFileManager class];
-    SEL containerSEL = @selector(containerURLForSecurityApplicationGroupIdentifier:);
-    LarrkSwizzle(fmClass, containerSEL, (IMP)hooked_NSFileManager_containerURL, &orig_NSFileManager_containerURL);
+    LarrkSwizzle(fmClass, @selector(containerURLForSecurityApplicationGroupIdentifier:), (IMP)hooked_NSFileManager_containerURL, &orig_NSFileManager_containerURL);
     
-    // 2. Swizzle -[NSUserDefaults initWithSuiteName:] on NSUserDefaults and placeholder
     Class udClass = [NSUserDefaults class];
     SEL suiteSEL = @selector(initWithSuiteName:);
     LarrkSwizzle(udClass, suiteSEL, (IMP)hooked_NSUserDefaults_initWithSuiteName, &orig_NSUserDefaults_initWithSuiteName);
@@ -154,15 +196,119 @@ static void LarrkInstallSideloadFix(void) {
             LarrkSwizzle(phClass, suiteSEL, (IMP)hooked_NSUserDefaults_initWithSuiteName, &orig_NSUserDefaults_initWithSuiteName);
         }
     }
-    
-    NSLog(@"[LarrkMod] [SideloadFix] AppGroup & NSUserDefaults hooks installed successfully.");
+    NSLog(@"[LarrkMod] [SideloadFix] AppGroup & NSUserDefaults fixes installed.");
 }
 
-#pragma mark - Hook 1: Anti-Delete & Message Alpha Hook
+#pragma mark - 3. Keychain Fix via Fishhook (NO MSHookFunction)
+
+static OSStatus (*orig_SecItemAdd)(CFDictionaryRef attributes, CFTypeRef *result) = NULL;
+static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result) = NULL;
+static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) = NULL;
+static OSStatus (*orig_SecItemDelete)(CFDictionaryRef query) = NULL;
+
+static CFDictionaryRef LarrkCleanKeychainDictionary(CFDictionaryRef dictRef) {
+    if (!dictRef) return NULL;
+    NSDictionary *dict = (__bridge NSDictionary *)dictRef;
+    if (![dict isKindOfClass:[NSDictionary class]]) return (CFDictionaryRef)CFRetain(dictRef);
+    
+    id accessGroupKey = (__bridge id)kSecAttrAccessGroup;
+    if ([dict objectForKey:accessGroupKey] != nil || [dict objectForKey:@"agrp"] != nil) {
+        NSMutableDictionary *mutableDict = [dict mutableCopy];
+        [mutableDict removeObjectForKey:accessGroupKey];
+        [mutableDict removeObjectForKey:@"agrp"];
+        return (__bridge_retained CFDictionaryRef)mutableDict;
+    }
+    return (CFDictionaryRef)CFRetain(dictRef);
+}
+
+static OSStatus hooked_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+    if (attributes) {
+        CFDictionaryRef clean = LarrkCleanKeychainDictionary(attributes);
+        OSStatus status = orig_SecItemAdd ? orig_SecItemAdd(clean, result) : errSecSuccess;
+        if (clean) CFRelease(clean);
+        return status;
+    }
+    return orig_SecItemAdd ? orig_SecItemAdd(attributes, result) : errSecParam;
+}
+
+static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    if (query) {
+        CFDictionaryRef clean = LarrkCleanKeychainDictionary(query);
+        OSStatus status = orig_SecItemCopyMatching ? orig_SecItemCopyMatching(clean, result) : errSecItemNotFound;
+        if (clean) CFRelease(clean);
+        return status;
+    }
+    return orig_SecItemCopyMatching ? orig_SecItemCopyMatching(query, result) : errSecParam;
+}
+
+static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
+    CFDictionaryRef cleanQuery = query ? LarrkCleanKeychainDictionary(query) : NULL;
+    CFDictionaryRef cleanAttrs = attributesToUpdate ? LarrkCleanKeychainDictionary(attributesToUpdate) : NULL;
+    
+    OSStatus status = orig_SecItemUpdate ? orig_SecItemUpdate(cleanQuery ?: query, cleanAttrs ?: attributesToUpdate) : errSecSuccess;
+    
+    if (cleanQuery) CFRelease(cleanQuery);
+    if (cleanAttrs) CFRelease(cleanAttrs);
+    return status;
+}
+
+static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
+    if (query) {
+        CFDictionaryRef clean = LarrkCleanKeychainDictionary(query);
+        OSStatus status = orig_SecItemDelete ? orig_SecItemDelete(clean) : errSecSuccess;
+        if (clean) CFRelease(clean);
+        return status;
+    }
+    return orig_SecItemDelete ? orig_SecItemDelete(query) : errSecParam;
+}
+
+static void LarrkInstallKeychainFishhook(void) {
+    struct rebinding rebindings[] = {
+        {"SecItemAdd", (void *)hooked_SecItemAdd, (void **)&orig_SecItemAdd},
+        {"SecItemCopyMatching", (void *)hooked_SecItemCopyMatching, (void **)&orig_SecItemCopyMatching},
+        {"SecItemUpdate", (void *)hooked_SecItemUpdate, (void **)&orig_SecItemUpdate},
+        {"SecItemDelete", (void *)hooked_SecItemDelete, (void **)&orig_SecItemDelete}
+    };
+    rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
+    NSLog(@"[LarrkMod] [KeychainFix] Keychain C functions successfully rebound via fishhook.");
+}
+
+#pragma mark - 5. Built-in Bundle ID Spoofer
+
+static IMP orig_NSBundle_bundleIdentifier = NULL;
+static NSString *hooked_NSBundle_bundleIdentifier(NSBundle *self, SEL _cmd) {
+    NSString *bid = nil;
+    if (orig_NSBundle_bundleIdentifier) {
+        bid = ((NSString *(*)(id, SEL))orig_NSBundle_bundleIdentifier)(self, _cmd);
+    }
+    if (bid && [bid hasPrefix:@"app.swiftgram.ios"]) {
+        return @"app.swiftgram.ios";
+    }
+    return bid;
+}
+
+static IMP orig_NSBundle_objectForInfoDictionaryKey = NULL;
+static id hooked_NSBundle_objectForInfoDictionaryKey(NSBundle *self, SEL _cmd, NSString *key) {
+    if ([key isEqualToString:@"CFBundleIdentifier"]) {
+        return @"app.swiftgram.ios";
+    }
+    if (orig_NSBundle_objectForInfoDictionaryKey) {
+        return ((id(*)(id, SEL, NSString *))orig_NSBundle_objectForInfoDictionaryKey)(self, _cmd, key);
+    }
+    return nil;
+}
+
+static void LarrkInstallBundleIDSpoofer(void) {
+    Class bClass = [NSBundle class];
+    LarrkSwizzle(bClass, @selector(bundleIdentifier), (IMP)hooked_NSBundle_bundleIdentifier, &orig_NSBundle_bundleIdentifier);
+    LarrkSwizzle(bClass, @selector(objectForInfoDictionaryKey:), (IMP)hooked_NSBundle_objectForInfoDictionaryKey, &orig_NSBundle_objectForInfoDictionaryKey);
+    NSLog(@"[LarrkMod] [BundleIDSpoofer] Bundle ID spoofer installed.");
+}
+
+#pragma mark - Hook: Anti-Delete & Message Alpha Hook
 
 static IMP orig_ChatMessageItemView_setAlpha = NULL;
 static void hooked_ChatMessageItemView_setAlpha(id self, SEL _cmd, CGFloat alpha) {
-    // If antiDelete is enabled, check if this message is deleted
     if ([LarrkConfig shared].antiDelete) {
         id item = nil;
         @try {
@@ -174,15 +320,16 @@ static void hooked_ChatMessageItemView_setAlpha(id self, SEL _cmd, CGFloat alpha
         int64_t msgId = 0;
         if (item) {
             @try {
-                id message = [item valueForKey:@"message"];
-                if (message && [message respondsToSelector:NSSelectorFromString(@"id")]) {
-                    msgId = (int64_t)[[message valueForKey:@"id"] longLongValue];
+                if ([item respondsToSelector:NSSelectorFromString(@"message")]) {
+                    id message = [item valueForKey:@"message"];
+                    if (message && [message respondsToSelector:NSSelectorFromString(@"id")]) {
+                        msgId = (int64_t)[[message valueForKey:@"id"] longLongValue];
+                    }
                 }
             } @catch (NSException *e) {}
         }
         
         if (msgId != 0 && [[LarrkConfig shared] isMessageDeleted:msgId]) {
-            // Apply 0.45 opacity to indicate deleted message
             alpha = 0.45f;
         }
     }
@@ -209,23 +356,23 @@ static void hooked_ChatMessageItemView_layout(id self, SEL _cmd) {
         int64_t msgId = 0;
         if (item) {
             @try {
-                id message = [item valueForKey:@"message"];
-                if (message && [message respondsToSelector:NSSelectorFromString(@"id")]) {
-                    msgId = (int64_t)[[message valueForKey:@"id"] longLongValue];
+                if ([item respondsToSelector:NSSelectorFromString(@"message")]) {
+                    id message = [item valueForKey:@"message"];
+                    if (message && [message respondsToSelector:NSSelectorFromString(@"id")]) {
+                        msgId = (int64_t)[[message valueForKey:@"id"] longLongValue];
+                    }
                 }
             } @catch (NSException *e) {}
         }
         
         if (msgId != 0 && [[LarrkConfig shared] isMessageDeleted:msgId]) {
-            UIView *view = (UIView *)self;
-            if ([view isKindOfClass:[UIView class]]) {
-                view.alpha = 0.45f;
+            if ([self isKindOfClass:[UIView class]]) {
+                ((UIView *)self).alpha = 0.45f;
             }
         }
     }
 }
 
-// Hook message deletion dispatcher to store message ID into deletedMessageIds
 static IMP orig_deleteMessages = NULL;
 static void hooked_deleteMessages(id self, SEL _cmd, id messageIds, id type) {
     if ([LarrkConfig shared].antiDelete && [messageIds isKindOfClass:[NSArray class]]) {
@@ -240,7 +387,6 @@ static void hooked_deleteMessages(id self, SEL _cmd, id messageIds, id type) {
                 [[LarrkConfig shared] markMessageAsDeleted:mId];
             }
         }
-        // Do not propagate deletion to preserve messages in chat
         return;
     }
     
@@ -250,16 +396,16 @@ static void hooked_deleteMessages(id self, SEL _cmd, id messageIds, id type) {
 }
 
 static void LarrkSetupAntiDeleteHooks() {
-    Class itemViewClass = LarrkFindClassByNameOrSuffix("ChatMessageItemView");
+    Class itemViewClass = NSClassFromString(@"ChatMessageItemView");
     if (!itemViewClass) {
-        itemViewClass = LarrkFindClassByNameOrSuffix("ChatMessageBubbleItemNode");
+        itemViewClass = NSClassFromString(@"ChatMessageBubbleItemNode");
     }
     if (itemViewClass) {
         LarrkSwizzle(itemViewClass, @selector(setAlpha:), (IMP)hooked_ChatMessageItemView_setAlpha, &orig_ChatMessageItemView_setAlpha);
         LarrkSwizzle(itemViewClass, NSSelectorFromString(@"layout"), (IMP)hooked_ChatMessageItemView_layout, &orig_ChatMessageItemView_layout);
     }
     
-    Class chatHistoryClass = LarrkFindClassByNameOrSuffix("ChatHistoryController");
+    Class chatHistoryClass = NSClassFromString(@"ChatHistoryController");
     if (chatHistoryClass) {
         SEL deleteSEL = NSSelectorFromString(@"deleteMessages:type:");
         if (class_getInstanceMethod(chatHistoryClass, deleteSEL)) {
@@ -268,52 +414,40 @@ static void LarrkSetupAntiDeleteHooks() {
     }
 }
 
-#pragma mark - Hook 2: Ghost Mode (8 MTProto Actions & Online Status)
+#pragma mark - Hook: Ghost Mode (8 MTProto Actions & Online Status)
 
 static uint32_t LarrkFilterMTProtoActionConstructor(uint32_t constructorId) {
     LarrkConfig *config = [LarrkConfig shared];
-    
-    // Typing
     if (constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_TYPING && config.disableTyping) {
         return TL_CONSTRUCTOR_SEND_MESSAGE_CANCEL;
     }
-    // Record Video / Round
     if ((constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_RECORD_VIDEO || constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_RECORD_ROUND) && config.disableRecordVideo) {
         return TL_CONSTRUCTOR_SEND_MESSAGE_CANCEL;
     }
-    // Upload Video / Round
     if ((constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_UPLOAD_VIDEO || constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_UPLOAD_ROUND) && config.disableUploadVideo) {
         return TL_CONSTRUCTOR_SEND_MESSAGE_CANCEL;
     }
-    // Record Voice
     if (constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_RECORD_VOICE && config.disableRecordVoice) {
         return TL_CONSTRUCTOR_SEND_MESSAGE_CANCEL;
     }
-    // Upload Voice
     if (constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_UPLOAD_VOICE && config.disableUploadVoice) {
         return TL_CONSTRUCTOR_SEND_MESSAGE_CANCEL;
     }
-    // Upload Photo
     if (constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_UPLOAD_PHOTO && config.disableUploadPhoto) {
         return TL_CONSTRUCTOR_SEND_MESSAGE_CANCEL;
     }
-    // Upload Document / File
     if (constructorId == TL_CONSTRUCTOR_SEND_MESSAGE_UPLOAD_FILE && config.disableUploadFile) {
         return TL_CONSTRUCTOR_SEND_MESSAGE_CANCEL;
     }
-    
     return constructorId;
 }
 
-// Hook MTRequest / MTProto serialization writeInt32:
 static IMP orig_MTBuffer_writeInt32 = NULL;
 static void hooked_MTBuffer_writeInt32(id self, SEL _cmd, int32_t value) {
     uint32_t uValue = (uint32_t)value;
     uint32_t filtered = LarrkFilterMTProtoActionConstructor(uValue);
     
-    // Check account.updateStatus online/offline override
     if (uValue == TL_CONSTRUCTOR_ACCOUNT_UPDATE_STATUS && [LarrkConfig shared].disableOnline) {
-        // Enforce offline
         filtered = TL_CONSTRUCTOR_ACCOUNT_UPDATE_STATUS;
     }
     
@@ -322,12 +456,11 @@ static void hooked_MTBuffer_writeInt32(id self, SEL _cmd, int32_t value) {
     }
 }
 
-// Hook ChatInputActivity / setTyping to prevent emitting actions
 static IMP orig_ChatActivity_sendActivity = NULL;
 static void hooked_ChatActivity_sendActivity(id self, SEL _cmd, id activity) {
     LarrkConfig *config = [LarrkConfig shared];
     if (config.disableTyping || config.disableRecordVoice || config.disableRecordVideo) {
-        return; // Suppress activity broadcast
+        return;
     }
     if (orig_ChatActivity_sendActivity) {
         ((void(*)(id, SEL, id))orig_ChatActivity_sendActivity)(self, _cmd, activity);
@@ -335,9 +468,9 @@ static void hooked_ChatActivity_sendActivity(id self, SEL _cmd, id activity) {
 }
 
 static void LarrkSetupGhostModeHooks() {
-    Class bufferClass = LarrkFindClassByNameOrSuffix("MTBuffer");
+    Class bufferClass = NSClassFromString(@"MTBuffer");
     if (!bufferClass) {
-        bufferClass = LarrkFindClassByNameOrSuffix("TLBuffer");
+        bufferClass = NSClassFromString(@"TLBuffer");
     }
     if (bufferClass) {
         SEL writeSEL = NSSelectorFromString(@"writeInt32:");
@@ -346,7 +479,7 @@ static void LarrkSetupGhostModeHooks() {
         }
     }
     
-    Class activityManager = LarrkFindClassByNameOrSuffix("PeerInputActivityManager");
+    Class activityManager = NSClassFromString(@"PeerInputActivityManager");
     if (activityManager) {
         SEL actSEL = NSSelectorFromString(@"sendActivity:");
         if (class_getInstanceMethod(activityManager, actSEL)) {
@@ -355,7 +488,7 @@ static void LarrkSetupGhostModeHooks() {
     }
 }
 
-#pragma mark - Hook 3: Local Telegram Premium
+#pragma mark - Hook: Local Telegram Premium
 
 static IMP orig_TelegramUser_isPremium = NULL;
 static BOOL hooked_TelegramUser_isPremium(id self, SEL _cmd) {
@@ -376,7 +509,7 @@ static void LarrkSetupPremiumHooks() {
     ];
     
     for (NSString *name in userClassNames) {
-        Class userClass = LarrkFindClassByNameOrSuffix([name UTF8String]);
+        Class userClass = NSClassFromString(name);
         if (userClass) {
             SEL isPremiumSEL = NSSelectorFromString(@"isPremium");
             if (class_getInstanceMethod(userClass, isPremiumSEL)) {
@@ -386,7 +519,7 @@ static void LarrkSetupPremiumHooks() {
     }
 }
 
-#pragma mark - Hook 4: Local NFT Profile & Telegram Stars ⭐
+#pragma mark - Hook: Local NFT Profile & Telegram Stars
 
 static const char *kLarrkProfileGradientLayerKey = "kLarrkProfileGradientLayerKey";
 static const char *kLarrkProfileNFTBadgeKey       = "kLarrkProfileNFTBadgeKey";
@@ -409,7 +542,6 @@ static void hooked_PeerInfoHeaderNode_layout(id self, SEL _cmd) {
     }
     if (!view) return;
     
-    // Add/Update Gradient Layer
     CAGradientLayer *gradLayer = (CAGradientLayer *)objc_getAssociatedObject(view, kLarrkProfileGradientLayerKey);
     if (!gradLayer) {
         gradLayer = [CAGradientLayer layer];
@@ -428,7 +560,6 @@ static void hooked_PeerInfoHeaderNode_layout(id self, SEL _cmd) {
     }
     gradLayer.colors = cgColors;
     
-    // Add Pattern Emoji layer
     CATextLayer *patternLayer = (CATextLayer *)objc_getAssociatedObject(view, kLarrkProfilePatternLayerKey);
     if (!patternLayer && config.patternEmoji.length > 0) {
         patternLayer = [CATextLayer layer];
@@ -444,7 +575,6 @@ static void hooked_PeerInfoHeaderNode_layout(id self, SEL _cmd) {
         patternLayer.frame = CGRectMake(view.bounds.size.width - 40, 20, 30, 30);
     }
     
-    // Add NFT Badge View
     UIImageView *nftBadge = (UIImageView *)objc_getAssociatedObject(view, kLarrkProfileNFTBadgeKey);
     if (!nftBadge) {
         nftBadge = [[UIImageView alloc] initWithFrame:CGRectMake(16, view.bounds.size.height - 44, 32, 32)];
@@ -465,7 +595,6 @@ static void hooked_PeerInfoHeaderNode_layout(id self, SEL _cmd) {
     }
 }
 
-// Telegram Stars Balance Hook
 static IMP orig_StarsContext_balance = NULL;
 static int64_t hooked_StarsContext_balance(id self, SEL _cmd) {
     if ([LarrkConfig shared].customStarsEnabled) {
@@ -478,9 +607,9 @@ static int64_t hooked_StarsContext_balance(id self, SEL _cmd) {
 }
 
 static void LarrkSetupNFTAndStarsHooks() {
-    Class headerNodeClass = LarrkFindClassByNameOrSuffix("PeerInfoHeaderNode");
+    Class headerNodeClass = NSClassFromString(@"PeerInfoHeaderNode");
     if (!headerNodeClass) {
-        headerNodeClass = LarrkFindClassByNameOrSuffix("PeerInfoHeaderNavigationNode");
+        headerNodeClass = NSClassFromString(@"PeerInfoHeaderNavigationNode");
     }
     if (headerNodeClass) {
         SEL layoutSEL = NSSelectorFromString(@"layout");
@@ -489,9 +618,9 @@ static void LarrkSetupNFTAndStarsHooks() {
         }
     }
     
-    Class starsClass = LarrkFindClassByNameOrSuffix("StarsContext");
+    Class starsClass = NSClassFromString(@"StarsContext");
     if (!starsClass) {
-        starsClass = LarrkFindClassByNameOrSuffix("StarsState");
+        starsClass = NSClassFromString(@"StarsState");
     }
     if (starsClass) {
         SEL balanceSEL = NSSelectorFromString(@"balance");
@@ -501,31 +630,42 @@ static void LarrkSetupNFTAndStarsHooks() {
     }
 }
 
-#pragma mark - Constructor Entry Point
+#pragma mark - 6. Safe Constructor Entry Point (Jailed iOS 18+ Clean Startup)
 
 __attribute__((constructor))
 static void LarrkModInit(void) {
-    NSLog(@"[LarrkMod] Initializing LarrkMod iOS Tweak for Swiftgram...");
+    NSLog(@"[LarrkMod] Initializing LarrkMod iOS Tweak (Jailed iOS 18.7.3 Sideload Engine)...");
     
     @autoreleasepool {
-        // STEP 1: CRITICAL! Install Sideload Fix IMMEDIATELY and SYNCHRONOUSLY before anything else!
-        // This ensures Swiftgram/Telegram gets valid AppGroup container and NSUserDefaults right from the start.
+        // STEP 1: Main Thread SIGABRT Protection (FCAlertView & NSBundle nil URLs/paths)
+        LarrkInstallBundleCrashFix();
+        
+        // STEP 2: AppGroup Container & NSUserDefaults Suite Redirection (Black Screen Fix)
         LarrkInstallSideloadFix();
         
-        // STEP 2: Initialize configuration singleton (lightweight NSUserDefaults read)
+        // STEP 3: Built-in Bundle ID Spoofer (app.swiftgram.ios.XYZ -> app.swiftgram.ios)
+        LarrkInstallBundleIDSpoofer();
+        
+        // STEP 4: Keychain Access Group Interception via Fishhook (No MSHookFunction)
+        LarrkInstallKeychainFishhook();
+        
+        // STEP 5: Initialize persistent configuration
         [LarrkConfig shared];
         
-        // STEP 3: Setup Gesture Trigger & HUD Overlay (observes notification, non-blocking)
+        // STEP 6: Gesture Overlay Notification Registration (Zero synchronous UIWindow access)
         [[LarrkGestureOverlay shared] startListening];
         
-        // STEP 4: Install UI and Protocol hooks asynchronously so the main thread is never blocked at launch!
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSLog(@"[LarrkMod] Installing UI and protocol hooks on main thread...");
+        // STEP 7: Defer all UI and MTProto hooks to after application did finish launching
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification * _Nonnull note) {
+            NSLog(@"[LarrkMod] UIApplicationDidFinishLaunchingNotification received. Installing UI and MTProto hooks safely...");
             LarrkSetupAntiDeleteHooks();
             LarrkSetupGhostModeHooks();
             LarrkSetupPremiumHooks();
             LarrkSetupNFTAndStarsHooks();
-            NSLog(@"[LarrkMod] Initialization complete. Hold Chats tab (1s + 3s) to open menu.");
-        });
+            NSLog(@"[LarrkMod] All UI hooks installed safely.");
+        }];
     }
 }

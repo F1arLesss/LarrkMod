@@ -312,15 +312,10 @@
                                              selector:@selector(handleAppDidBecomeActive:)
                                                  name:UIApplicationDidBecomeActiveNotification
                                                object:nil];
-    
-    // Also trigger immediately after 2 seconds if app is already active
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self setupOverlayOnActiveWindow];
-    });
 }
 
 - (void)handleAppDidBecomeActive:(NSNotification *)notification {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self setupOverlayOnActiveWindow];
     });
 }

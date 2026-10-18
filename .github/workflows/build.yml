@@ -38,14 +38,16 @@ jobs:
             -isysroot "$SDK_PATH" \
             -miphoneos-version-min=14.0 \
             -fobjc-arc \
+            -Isrc \
             -framework UIKit \
             -framework Foundation \
             -framework QuartzCore \
             -framework CoreGraphics \
             -framework AudioToolbox \
+            -framework Security \
             -Wl,-install_name,@executable_path/Frameworks/LarrkMod.dylib \
             -O2 \
-            src/*.mm \
+            src/*.mm src/*.c \
             -o LarrkMod.dylib
 
       - name: Ad-Hoc Sign Binary & Verify
