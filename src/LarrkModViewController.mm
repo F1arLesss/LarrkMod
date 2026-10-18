@@ -105,7 +105,7 @@
     
     // Title
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 64, self.view.bounds.size.width - 32, 22)];
-    titleLabel.text = @"LarrkMod for Swiftgram";
+    titleLabel.text = @"LarrkMod for Telegram";
     titleLabel.textColor = LARRK_TEXT_PRIMARY;
     titleLabel.font = [UIFont systemFontOfSize:19 weight:UIFontWeightHeavy];
     titleLabel.textAlignment = NSTextAlignmentCenter;

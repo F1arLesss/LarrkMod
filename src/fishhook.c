@@ -160,6 +160,11 @@ static void rebind_symbols_for_image(struct rebindings_entry *rebindings,
     return;
   }
 
+  // Restrict symbol rebinding ONLY to binaries and frameworks inside the .app/ bundle
+  if (info.dli_fname == NULL || strstr(info.dli_fname, ".app/") == NULL) {
+    return;
+  }
+
   segment_command_t *cur_seg_cmd;
   segment_command_t *linkedit_segment = NULL;
   struct symtab_command* symtab_cmd = NULL;

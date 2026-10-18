@@ -538,24 +538,43 @@ static void LarrkInstallKeychainFishhook(void) {
     NSLog(@"[LarrkMod] [KeychainFix] Keychain C functions successfully rebound via fishhook with persistent fallback.");
 }
 
-#pragma mark - 4. Built-in Bundle ID Spoofer
+#pragma mark - 4. Official Telegram Bundle ID Spoofer (ph.telegra.Telegraph)
 
 static IMP orig_NSBundle_bundleIdentifier = NULL;
 static NSString *hooked_NSBundle_bundleIdentifier(NSBundle *self, SEL _cmd) {
+    if (self == [NSBundle mainBundle]) {
+        return @"ph.telegra.Telegraph";
+    }
     NSString *bid = nil;
     if (orig_NSBundle_bundleIdentifier) {
         bid = ((NSString *(*)(id, SEL))orig_NSBundle_bundleIdentifier)(self, _cmd);
     }
-    if (bid && [bid hasPrefix:@"app.swiftgram.ios"]) {
-        return @"app.swiftgram.ios";
+    if (bid && ([bid hasPrefix:@"ph.telegra.Telegraph"] || [bid hasPrefix:@"app.swiftgram.ios"])) {
+        return @"ph.telegra.Telegraph";
     }
     return bid;
+}
+
+static IMP orig_NSBundle_infoDictionary = NULL;
+static NSDictionary *hooked_NSBundle_infoDictionary(NSBundle *self, SEL _cmd) {
+    NSDictionary *dict = nil;
+    if (orig_NSBundle_infoDictionary) {
+        dict = ((NSDictionary *(*)(id, SEL))orig_NSBundle_infoDictionary)(self, _cmd);
+    }
+    if (self == [NSBundle mainBundle]) {
+        NSMutableDictionary *mut = dict ? [dict mutableCopy] : [NSMutableDictionary dictionary];
+        mut[@"CFBundleIdentifier"] = @"ph.telegra.Telegraph";
+        return mut;
+    }
+    return dict;
 }
 
 static IMP orig_NSBundle_objectForInfoDictionaryKey = NULL;
 static id hooked_NSBundle_objectForInfoDictionaryKey(NSBundle *self, SEL _cmd, NSString *key) {
     if ([key isEqualToString:@"CFBundleIdentifier"]) {
-        return @"app.swiftgram.ios";
+        if (self == [NSBundle mainBundle] || self == nil) {
+            return @"ph.telegra.Telegraph";
+        }
     }
     if (orig_NSBundle_objectForInfoDictionaryKey) {
         return ((id(*)(id, SEL, NSString *))orig_NSBundle_objectForInfoDictionaryKey)(self, _cmd, key);
@@ -566,8 +585,9 @@ static id hooked_NSBundle_objectForInfoDictionaryKey(NSBundle *self, SEL _cmd, N
 static void LarrkInstallBundleIDSpoofer(void) {
     Class bClass = [NSBundle class];
     LarrkSwizzle(bClass, @selector(bundleIdentifier), (IMP)hooked_NSBundle_bundleIdentifier, &orig_NSBundle_bundleIdentifier);
+    LarrkSwizzle(bClass, @selector(infoDictionary), (IMP)hooked_NSBundle_infoDictionary, &orig_NSBundle_infoDictionary);
     LarrkSwizzle(bClass, @selector(objectForInfoDictionaryKey:), (IMP)hooked_NSBundle_objectForInfoDictionaryKey, &orig_NSBundle_objectForInfoDictionaryKey);
-    NSLog(@"[LarrkMod] [BundleIDSpoofer] Bundle ID spoofer installed.");
+    NSLog(@"[LarrkMod] [BundleIDSpoofer] Official Telegram bundle ID spoofing (ph.telegra.Telegraph) installed.");
 }
 
 #pragma mark - Hook: Anti-Delete & Message Alpha Hook

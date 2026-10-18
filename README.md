@@ -1,20 +1,23 @@
-# ⚡ LarrkMod for Swiftgram (app.swiftgram.ios)
+# ⚡ LarrkMod for Telegram & Swiftgram (`ph.telegra.Telegraph` / `app.swiftgram.ios`)
 
 [![Build LarrkMod Tweak](https://github.com/F1arLesss/LarrkMod/actions/workflows/build.yml/badge.svg)](https://github.com/F1arLesss/LarrkMod/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/F1arLesss/LarrkMod?style=flat&color=9d4edd)](https://github.com/F1arLesss/LarrkMod/releases)
 [![Platform](https://img.shields.io/badge/Platform-iOS%2014.0%2B-blue.svg)](https://apple.com)
 [![Architecture](https://img.shields.io/badge/Arch-arm64-success.svg)](https://github.com/F1arLesss/LarrkMod)
 
-Автономный iOS-твик **LarrkMod** для Telegram-клиента **Swiftgram** (`app.swiftgram.ios`). Разработан специально для сайдлоадинга через Sideloadly, TrollStore, Scarlet и AltStore на не-джейлбрейкнутых устройствах.
+Автономный iOS-твик **LarrkMod** для официального клиента **Telegram** (`ph.telegra.Telegraph`) и **Swiftgram** (`app.swiftgram.ios`). Разработан специально для сайдлоадинга через Sideloadly, ESign, TrollStore, Scarlet и AltStore на не-джейлбрейкнутых устройствах (iOS 14 - 18+).
 
 ---
 
 ## 🌟 Основные возможности
 
-### 0. 🚀 Встроенный Sideload Fix (Решение черного экрана)
-- **Автоматический редирект AppGroup:** при запуске на не-джейлбрейкнутых устройствах (с бесплатным Apple ID и измененным Bundle ID) системный вызов `containerURLForSecurityApplicationGroupIdentifier:` возвращает `nil`. Твик перехватывает этот вызов и возвращает локальную изолированную папку `Documents/AppGroup`.
-- **Редирект NSUserDefaults Suite:** вызовы `initWithSuiteName:` для групп `group.*` автоматически перенаправляются на рабочий `standardUserDefaults`.
-- **Мгновенный старт:** тяжелые UI-хуки инициализируются асинхронно, предотвращая блокировку главного потока при запуске приложения.
+### 0. 🚀 Встроенный Jailed Sideload Fix (Решение черного экрана и вылетов при логине)
+- **Спуфинг Bundle ID (`ph.telegra.Telegraph`):** автоматическая подмена бандла для главного модуля, исключающая сбои при смене Team ID и подписи.
+- **Автоматический редирект AppGroup:** при запуске на не-джейлбрейкнутых устройствах (с бесплатным Apple ID и измененным Bundle ID) системный вызов `containerURLForSecurityApplicationGroupIdentifier:` перенаправляется в `<Documents>/AppGroup/telegram-data`.
+- **Редирект NSUserDefaults Suite:** вызовы `initWithSuiteName:` для групп `group.*`, `telegraph` и `telegram` автоматически перенаправляются на рабочий `standardUserDefaults`.
+- **Безопасный Keychain через Fishhook (без MSHookFunction):** перехват `SecItemAdd`, `SecItemCopyMatching`, `SecItemUpdate`, `SecItemDelete` только для бинарников внутри `.app/`, удаление `kSecAttrAccessGroup` и замена `kSecAttrAccessible` на `kSecAttrAccessibleAfterFirstUnlock`.
+- **Надежный Fallback авторизации (`Documents/keychain_fallback.plist`):** предотвращение `abort()` и ошибок `-34018` при СМС-авторизации.
+- **Блокировка рекламы сторонних сайтов:** подавление баннеров `FCAlertView`, `iOSGods`, `ArmConverter` и `JHBannerView`.
 
 ### 1. 🛡️ Анти-Удаление сообщений
 - Сохраняет удаленные собеседником или администратором сообщения прямо в чате.

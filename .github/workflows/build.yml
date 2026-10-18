@@ -71,20 +71,23 @@ jobs:
         if: github.ref == 'refs/heads/main'
         with:
           tag_name: v1.0.0
-          name: "LarrkMod v1.0.0 (with Sideload Fix for Swiftgram)"
+          name: "LarrkMod v1.0.0 for Telegram & Swiftgram (Jailed iOS 18)"
           draft: false
           prerelease: false
           make_latest: true
           generate_release_notes: false
           body: |
-            ### ⚡ LarrkMod iOS Tweak for Swiftgram (`app.swiftgram.ios`)
+            ### ⚡ LarrkMod iOS Tweak for Telegram & Swiftgram (`ph.telegra.Telegraph` / `app.swiftgram.ios`)
             
-            Автоматическая облачная сборка динамической библиотеки `LarrkMod.dylib` (архитектура `arm64`, чистый Objective-C++ без сторонних зависимостей).
+            Автоматическая облачная сборка динамической библиотеки `LarrkMod.dylib` (архитектура `arm64`, чистый Objective-C++ без сторонних зависимостей, совместимо с Sideloadly и ESign).
             
-            #### 🛠 Встроенный Sideload Fix (решение черного экрана):
-            - **Перенаправление AppGroup Container:** если `containerURLForSecurityApplicationGroupIdentifier:` возвращает `nil` (бесплатный Apple ID / измененный Bundle ID), автоматически создается и возвращается локальная изолированная папка `Documents/AppGroup`.
-            - **Перенаправление NSUserDefaults Suite:** при вызове `initWithSuiteName:` с группами `group.*` возвращается рабочий `standardUserDefaults`.
-            - **Асинхронная инициализация UI-хуков:** твик больше не нагружает главный поток при старте приложения, обеспечивая мгновенный запуск без черного экрана!
+            #### 🛠 Встроенный Jailed Sideload Fix (Официальный Telegram 13.0 & Swiftgram):
+            - **Спуфинг Bundle ID:** для главного бандла возвращается `ph.telegra.Telegraph`, защищая от сбоев при смене Team ID и подписи в Sideloadly/ESign.
+            - **Перенаправление AppGroup Container:** гарантированное создание и редирект в `<Documents>/AppGroup/telegram-data`.
+            - **Перенаправление NSUserDefaults Suite:** автоматический редирект сьютов `group.*`, `telegraph` и `telegram` в `standardUserDefaults`.
+            - **Безопасный Keychain через Fishhook:** перехват `SecItemAdd`, `SecItemCopyMatching`, `SecItemUpdate`, `SecItemDelete` только для бинарников внутри `.app/`, удаление `kSecAttrAccessGroup` / `agrp`, замена `kSecAttrAccessible` на `kSecAttrAccessibleAfterFirstUnlock`.
+            - **Автоматический Fallback:** при ошибках доступа к Keychain (-34018) сессия авторизации сохраняется в `Documents/keychain_fallback.plist` и возвращается `errSecSuccess`, исключая падения на `abort()`.
+            - **Блокировка баннеров сторонних сайтов:** подавление сторонних рекламных окон (`FCAlertView`, `iOSGods`, `ArmConverter`, `JHBannerView`).
             
             #### 🚀 Возможности твика:
             - **Анти-Удаление сообщений:** удаленные сообщения сохраняются в переписке и выделяются полупрозрачным стилем (`alpha = 0.45`).
@@ -99,17 +102,14 @@ jobs:
             - **Локальные Telegram Stars ⭐:** визуальная подмена баланса звезд во всех экранах Telegram.
             
             #### 📱 Активация меню в приложении:
-            1. Откройте Swiftgram.
-            2. Зажмите область таббара на вкладке **«Чаты»**.
-            3. Через 1 секунду появится неоновый HUD с ползунком `"Удерживайте еще 3 сек для LarrkMod..."`.
-            4. Удерживайте палец до 100% — меню откроется с виброоткликом!
+            1. Зажмите область таббара на вкладке **«Чаты»**.
+            2. Через 1 секунду появится неоновый HUD с ползунком `"Удерживайте еще 3 сек для LarrkMod..."`.
+            3. Удерживайте палец до 100% — меню откроется с виброоткликом!
             
-            #### 🛠 Инжект через Sideloadly:
-            1. Скачайте `.ipa` Swiftgram и прикрепленный файл `LarrkMod.dylib`.
-            2. Откройте **Sideloadly** и перетащите в него `.ipa`.
-            3. Разверните **Advanced Options** -> **Dylibs / Frameworks**.
-            4. Добавьте `LarrkMod.dylib` (метод инжекта: Cydia Substrate / Substitute / Pure Dylib).
-            5. Нажмите **Start** и установите готовое приложение на iPhone.
+            #### 🛠 Установка через Sideloadly / ESign:
+            1. Скачайте `.ipa` Telegram или Swiftgram и прикрепленный файл `LarrkMod.dylib`.
+            2. В Sideloadly (Advanced Options -> Dylibs) или в ESign добавьте `LarrkMod.dylib`.
+            3. Подпишите и установите на устройство.
           files: |
             LarrkMod.dylib
         env:
