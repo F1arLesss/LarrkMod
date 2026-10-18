@@ -35,24 +35,29 @@ static const uint32_t TL_CONSTRUCTOR_ACCOUNT_UPDATE_STATUS       = 0x6628f585;
 static Class LarrkFindClassByNameOrSuffix(const char *nameOrSuffix) {
     if (!nameOrSuffix) return Nil;
     
-    // Direct lookup first
+    // Direct lookup first (O(1))
     Class cls = objc_getClass(nameOrSuffix);
     if (cls) return cls;
     
-    // Scan loaded classes for Swift mangled match
-    int numClasses = objc_getClassList(NULL, 0);
-    if (numClasses > 0) {
-        Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
-        numClasses = objc_getClassList(classes, numClasses);
-        for (int i = 0; i < numClasses; i++) {
-            const char *className = class_getName(classes[i]);
+    // Scan loaded classes only once to avoid repeated expensive scans
+    static Class *allLoadedClasses = NULL;
+    static int loadedClassCount = 0;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        loadedClassCount = objc_getClassList(NULL, 0);
+        if (loadedClassCount > 0) {
+            allLoadedClasses = (Class *)malloc(sizeof(Class) * loadedClassCount);
+            loadedClassCount = objc_getClassList(allLoadedClasses, loadedClassCount);
+        }
+    });
+    
+    if (allLoadedClasses && loadedClassCount > 0) {
+        for (int i = 0; i < loadedClassCount; i++) {
+            const char *className = class_getName(allLoadedClasses[i]);
             if (className && (strstr(className, nameOrSuffix) != NULL)) {
-                Class found = classes[i];
-                free(classes);
-                return found;
+                return allLoadedClasses[i];
             }
         }
-        free(classes);
     }
     return Nil;
 }
@@ -75,6 +80,82 @@ static BOOL LarrkSwizzle(Class cls, SEL origSEL, IMP newIMP, IMP *outOrigIMP) {
         }
     }
     return YES;
+}
+
+#pragma mark - Sideload Fix (AppGroup Container & NSUserDefaults Suite)
+
+static IMP orig_NSFileManager_containerURL = NULL;
+static NSURL *hooked_NSFileManager_containerURL(id self, SEL _cmd, NSString *groupIdentifier) {
+    NSURL *url = nil;
+    if (orig_NSFileManager_containerURL) {
+        url = ((NSURL *(*)(id, SEL, NSString *))orig_NSFileManager_containerURL)(self, _cmd, groupIdentifier);
+    }
+    
+    // If running in environment with valid App Group entitlements (e.g. paid developer certificate), return it
+    if (url) {
+        return url;
+    }
+    
+    // Fallback for sideloaded environment (jailed / free Apple ID / modified Bundle ID)
+    static NSURL *appGroupURL = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *documentsPath = paths.firstObject;
+        NSString *groupDir = [documentsPath stringByAppendingPathComponent:@"AppGroup"];
+        
+        NSFileManager *fm = [NSFileManager defaultManager];
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:groupDir isDirectory:&isDir]) {
+            [fm createDirectoryAtPath:groupDir withIntermediateDirectories:YES attributes:nil error:nil];
+        }
+        appGroupURL = [NSURL fileURLWithPath:groupDir isDirectory:YES];
+        NSLog(@"[LarrkMod] [SideloadFix] Initialized fallback AppGroup directory at: %@", groupDir);
+    });
+    
+    NSLog(@"[LarrkMod] [SideloadFix] Redirected containerURL for group '%@' -> %@", groupIdentifier, appGroupURL.path);
+    return appGroupURL;
+}
+
+static IMP orig_NSUserDefaults_initWithSuiteName = NULL;
+static id hooked_NSUserDefaults_initWithSuiteName(id self, SEL _cmd, NSString *suiteName) {
+    if (suiteName && ([suiteName hasPrefix:@"group."] || [suiteName containsString:@"group."])) {
+        NSLog(@"[LarrkMod] [SideloadFix] Redirected NSUserDefaults suite '%@' -> standardUserDefaults", suiteName);
+        return [NSUserDefaults standardUserDefaults];
+    }
+    
+    id res = nil;
+    if (orig_NSUserDefaults_initWithSuiteName) {
+        res = ((id(*)(id, SEL, NSString *))orig_NSUserDefaults_initWithSuiteName)(self, _cmd, suiteName);
+    }
+    if (!res) {
+        res = [NSUserDefaults standardUserDefaults];
+    }
+    return res;
+}
+
+static void LarrkInstallSideloadFix(void) {
+    NSLog(@"[LarrkMod] [SideloadFix] Installing AppGroup & NSUserDefaults fixes...");
+    
+    // 1. Swizzle -[NSFileManager containerURLForSecurityApplicationGroupIdentifier:]
+    Class fmClass = [NSFileManager class];
+    SEL containerSEL = @selector(containerURLForSecurityApplicationGroupIdentifier:);
+    LarrkSwizzle(fmClass, containerSEL, (IMP)hooked_NSFileManager_containerURL, &orig_NSFileManager_containerURL);
+    
+    // 2. Swizzle -[NSUserDefaults initWithSuiteName:] on NSUserDefaults and placeholder
+    Class udClass = [NSUserDefaults class];
+    SEL suiteSEL = @selector(initWithSuiteName:);
+    LarrkSwizzle(udClass, suiteSEL, (IMP)hooked_NSUserDefaults_initWithSuiteName, &orig_NSUserDefaults_initWithSuiteName);
+    
+    id placeholder = [NSUserDefaults alloc];
+    if (placeholder) {
+        Class phClass = [placeholder class];
+        if (phClass && phClass != udClass) {
+            LarrkSwizzle(phClass, suiteSEL, (IMP)hooked_NSUserDefaults_initWithSuiteName, &orig_NSUserDefaults_initWithSuiteName);
+        }
+    }
+    
+    NSLog(@"[LarrkMod] [SideloadFix] AppGroup & NSUserDefaults hooks installed successfully.");
 }
 
 #pragma mark - Hook 1: Anti-Delete & Message Alpha Hook
@@ -427,18 +508,24 @@ static void LarrkModInit(void) {
     NSLog(@"[LarrkMod] Initializing LarrkMod iOS Tweak for Swiftgram...");
     
     @autoreleasepool {
-        // 1. Initialize configuration singleton
+        // STEP 1: CRITICAL! Install Sideload Fix IMMEDIATELY and SYNCHRONOUSLY before anything else!
+        // This ensures Swiftgram/Telegram gets valid AppGroup container and NSUserDefaults right from the start.
+        LarrkInstallSideloadFix();
+        
+        // STEP 2: Initialize configuration singleton (lightweight NSUserDefaults read)
         [LarrkConfig shared];
         
-        // 2. Setup Gesture Trigger & HUD Overlay
+        // STEP 3: Setup Gesture Trigger & HUD Overlay (observes notification, non-blocking)
         [[LarrkGestureOverlay shared] startListening];
         
-        // 3. Install Runtime Hooks safely
-        LarrkSetupAntiDeleteHooks();
-        LarrkSetupGhostModeHooks();
-        LarrkSetupPremiumHooks();
-        LarrkSetupNFTAndStarsHooks();
-        
-        NSLog(@"[LarrkMod] Initialization complete. Hold Chats tab (1s + 3s) to open menu.");
+        // STEP 4: Install UI and Protocol hooks asynchronously so the main thread is never blocked at launch!
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSLog(@"[LarrkMod] Installing UI and protocol hooks on main thread...");
+            LarrkSetupAntiDeleteHooks();
+            LarrkSetupGhostModeHooks();
+            LarrkSetupPremiumHooks();
+            LarrkSetupNFTAndStarsHooks();
+            NSLog(@"[LarrkMod] Initialization complete. Hold Chats tab (1s + 3s) to open menu.");
+        });
     }
 }

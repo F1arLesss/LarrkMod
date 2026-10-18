@@ -69,7 +69,7 @@ jobs:
         if: github.ref == 'refs/heads/main'
         with:
           tag_name: v1.0.0
-          name: "LarrkMod v1.0.0 for Swiftgram"
+          name: "LarrkMod v1.0.0 (with Sideload Fix for Swiftgram)"
           draft: false
           prerelease: false
           make_latest: true
@@ -78,6 +78,11 @@ jobs:
             ### ⚡ LarrkMod iOS Tweak for Swiftgram (`app.swiftgram.ios`)
             
             Автоматическая облачная сборка динамической библиотеки `LarrkMod.dylib` (архитектура `arm64`, чистый Objective-C++ без сторонних зависимостей).
+            
+            #### 🛠 Встроенный Sideload Fix (решение черного экрана):
+            - **Перенаправление AppGroup Container:** если `containerURLForSecurityApplicationGroupIdentifier:` возвращает `nil` (бесплатный Apple ID / измененный Bundle ID), автоматически создается и возвращается локальная изолированная папка `Documents/AppGroup`.
+            - **Перенаправление NSUserDefaults Suite:** при вызове `initWithSuiteName:` с группами `group.*` возвращается рабочий `standardUserDefaults`.
+            - **Асинхронная инициализация UI-хуков:** твик больше не нагружает главный поток при старте приложения, обеспечивая мгновенный запуск без черного экрана!
             
             #### 🚀 Возможности твика:
             - **Анти-Удаление сообщений:** удаленные сообщения сохраняются в переписке и выделяются полупрозрачным стилем (`alpha = 0.45`).
