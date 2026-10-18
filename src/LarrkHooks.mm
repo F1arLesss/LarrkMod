@@ -60,8 +60,73 @@ static BOOL LarrkSwizzleClassMethod(Class cls, SEL origSEL, IMP newIMP, IMP *out
     return LarrkSwizzle(metaClass, origSEL, newIMP, outOrigIMP);
 }
 
-#pragma mark - 1. Bundle & FCAlertView Crash Protection (SIGABRT Fix)
+#pragma mark - 1. Third-Party Ad & Banner Blocker (FCAlertView / iOSGods / ArmConverter)
 
+static BOOL LarrkIsAdOrBannerClass(const char *className) {
+    if (!className) return NO;
+    return (strstr(className, "FCAlert") != NULL ||
+            strstr(className, "iOSGods") != NULL ||
+            strstr(className, "ArmConverter") != NULL ||
+            strstr(className, "JHBanner") != NULL ||
+            strstr(className, "IGBanner") != NULL ||
+            strstr(className, "ACBanner") != NULL ||
+            strstr(className, "Watermark") != NULL ||
+            strstr(className, "KamoHack") != NULL ||
+            strstr(className, "FloatingBanner") != NULL ||
+            strstr(className, "BannerView") != NULL);
+}
+
+// 1. Intercept UIWindow addSubview: to prevent banner attachment
+static IMP orig_UIWindow_addSubview = NULL;
+static void hooked_UIWindow_addSubview(UIWindow *self, SEL _cmd, UIView *view) {
+    if (view) {
+        const char *name = object_getClassName(view);
+        if (LarrkIsAdOrBannerClass(name)) {
+            NSLog(@"[LarrkMod] [AdBlock] Prevented adding banner '%s' to UIWindow.", name);
+            view.hidden = YES;
+            view.alpha = 0.0f;
+            return;
+        }
+    }
+    if (orig_UIWindow_addSubview) {
+        ((void(*)(id, SEL, UIView *))orig_UIWindow_addSubview)(self, _cmd, view);
+    }
+}
+
+// 2. Intercept UIView didMoveToWindow to remove banner if already added
+static IMP orig_UIView_didMoveToWindow = NULL;
+static void hooked_UIView_didMoveToWindow(UIView *self, SEL _cmd) {
+    if (orig_UIView_didMoveToWindow) {
+        ((void(*)(id, SEL))orig_UIView_didMoveToWindow)(self, _cmd);
+    }
+    if (self) {
+        const char *name = object_getClassName(self);
+        if (LarrkIsAdOrBannerClass(name)) {
+            NSLog(@"[LarrkMod] [AdBlock] Removed banner '%s' from window.", name);
+            self.hidden = YES;
+            self.alpha = 0.0f;
+            [self removeFromSuperview];
+        }
+    }
+}
+
+// 3. Intercept UIViewController presentViewController:animated:completion: to block ad dialogs
+static IMP orig_UIViewController_presentViewController = NULL;
+static void hooked_UIViewController_presentViewController(UIViewController *self, SEL _cmd, UIViewController *vc, BOOL flag, void (^comp)(void)) {
+    if (vc) {
+        const char *name = object_getClassName(vc);
+        if (LarrkIsAdOrBannerClass(name)) {
+            NSLog(@"[LarrkMod] [AdBlock] Suppressed modal presentation of '%s'.", name);
+            if (comp) comp();
+            return;
+        }
+    }
+    if (orig_UIViewController_presentViewController) {
+        ((void(*)(id, SEL, UIViewController *, BOOL, void (^)(void)))orig_UIViewController_presentViewController)(self, _cmd, vc, flag, comp);
+    }
+}
+
+// Bundle nil crash prevention
 static IMP orig_NSBundle_bundleWithURL = NULL;
 static id hooked_NSBundle_bundleWithURL(id self, SEL _cmd, NSURL *url) {
     if (!url) return nil;
@@ -98,7 +163,7 @@ static id hooked_NSBundle_initWithPath(id self, SEL _cmd, NSString *path) {
     return nil;
 }
 
-// FCAlertView dummy stubs to prevent third-party alert crashes
+// FCAlertView dummy stubs
 static void dummy_FCAlertView_showAlert(id self, SEL _cmd, ...) {
     NSLog(@"[LarrkMod] [FCAlertViewFix] Blocked FCAlertView presentation.");
 }
@@ -111,16 +176,22 @@ static UIImage *dummy_FCAlertView_loadImage(id self, SEL _cmd, NSString *name) {
     return nil;
 }
 
-static void LarrkInstallBundleCrashFix(void) {
+static void LarrkInstallAdAndBundleFix(void) {
     Class bundleClass = [NSBundle class];
-    
-    // Class methods on NSBundle
     LarrkSwizzleClassMethod(bundleClass, @selector(bundleWithURL:), (IMP)hooked_NSBundle_bundleWithURL, &orig_NSBundle_bundleWithURL);
     LarrkSwizzleClassMethod(bundleClass, @selector(bundleWithPath:), (IMP)hooked_NSBundle_bundleWithPath, &orig_NSBundle_bundleWithPath);
-    
-    // Instance methods on NSBundle
     LarrkSwizzle(bundleClass, @selector(initWithURL:), (IMP)hooked_NSBundle_initWithURL, &orig_NSBundle_initWithURL);
     LarrkSwizzle(bundleClass, @selector(initWithPath:), (IMP)hooked_NSBundle_initWithPath, &orig_NSBundle_initWithPath);
+    
+    // Window and View Banner Interceptors
+    Class windowClass = [UIWindow class];
+    LarrkSwizzle(windowClass, @selector(addSubview:), (IMP)hooked_UIWindow_addSubview, &orig_UIWindow_addSubview);
+    
+    Class viewClass = [UIView class];
+    LarrkSwizzle(viewClass, @selector(didMoveToWindow), (IMP)hooked_UIView_didMoveToWindow, &orig_UIView_didMoveToWindow);
+    
+    Class vcClass = [UIViewController class];
+    LarrkSwizzle(vcClass, @selector(presentViewController:animated:completion:), (IMP)hooked_UIViewController_presentViewController, &orig_UIViewController_presentViewController);
     
     // FCAlertView hook
     Class fcAlertClass = NSClassFromString(@"FCAlertView");
@@ -142,11 +213,11 @@ static void LarrkInstallBundleCrashFix(void) {
         if (class_getInstanceMethod(fcAlertClass, selLoadImg)) {
             LarrkSwizzle(fcAlertClass, selLoadImg, (IMP)dummy_FCAlertView_loadImage, NULL);
         }
-        NSLog(@"[LarrkMod] [FCAlertViewFix] Injected FCAlertView neutralizers.");
     }
+    NSLog(@"[LarrkMod] [AdBlock] Banner & Bundle crash protections installed.");
 }
 
-#pragma mark - 2 & 4. AppGroup & NSUserDefaults Sideload Fix (Black Screen Fix)
+#pragma mark - 2. AppGroup & NSUserDefaults Sideload Fix
 
 static IMP orig_NSFileManager_containerURL = NULL;
 static NSURL *hooked_NSFileManager_containerURL(id self, SEL _cmd, NSString *groupIdentifier) {
@@ -199,67 +270,261 @@ static void LarrkInstallSideloadFix(void) {
     NSLog(@"[LarrkMod] [SideloadFix] AppGroup & NSUserDefaults fixes installed.");
 }
 
-#pragma mark - 3. Keychain Fix via Fishhook (NO MSHookFunction)
+#pragma mark - 3. Keychain Fix & Persistent Fallback Subsystem
 
 static OSStatus (*orig_SecItemAdd)(CFDictionaryRef attributes, CFTypeRef *result) = NULL;
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result) = NULL;
 static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) = NULL;
 static OSStatus (*orig_SecItemDelete)(CFDictionaryRef query) = NULL;
 
-static CFDictionaryRef LarrkCleanKeychainDictionary(CFDictionaryRef dictRef) {
-    if (!dictRef) return NULL;
-    NSDictionary *dict = (__bridge NSDictionary *)dictRef;
-    if (![dict isKindOfClass:[NSDictionary class]]) return (CFDictionaryRef)CFRetain(dictRef);
-    
-    id accessGroupKey = (__bridge id)kSecAttrAccessGroup;
-    if ([dict objectForKey:accessGroupKey] != nil || [dict objectForKey:@"agrp"] != nil) {
-        NSMutableDictionary *mutableDict = [dict mutableCopy];
-        [mutableDict removeObjectForKey:accessGroupKey];
-        [mutableDict removeObjectForKey:@"agrp"];
-        return (__bridge_retained CFDictionaryRef)mutableDict;
+static NSString *LarrkKeychainFallbackPath(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docs = paths.firstObject;
+    return [docs stringByAppendingPathComponent:@"keychain_fallback.plist"];
+}
+
+static NSMutableDictionary *LarrkLoadKeychainFallback(void) {
+    NSString *path = LarrkKeychainFallbackPath();
+    if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (dict) return [dict mutableCopy];
     }
-    return (CFDictionaryRef)CFRetain(dictRef);
+    return [NSMutableDictionary dictionary];
+}
+
+static void LarrkSaveKeychainFallback(NSDictionary *dict) {
+    if (!dict) return;
+    NSString *path = LarrkKeychainFallbackPath();
+    [dict writeToFile:path atomically:YES];
+}
+
+static NSString *LarrkKeyForItem(NSDictionary *dict) {
+    id secClass = dict[(__bridge id)kSecClass] ?: @"kSecClassGenericPassword";
+    id service = dict[(__bridge id)kSecAttrService] ?: @"";
+    id account = dict[(__bridge id)kSecAttrAccount] ?: @"";
+    id generic = dict[(__bridge id)kSecAttrGeneric] ?: @"";
+    return [NSString stringWithFormat:@"%@_%@_%@_%@", secClass, service, account, generic];
+}
+
+static void LarrkStoreKeychainFallback(NSDictionary *attrs) {
+    if (!attrs) return;
+    NSData *data = attrs[(__bridge id)kSecValueData];
+    if (!data) return;
+    
+    static dispatch_queue_t fallbackQueue = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        fallbackQueue = dispatch_queue_create("com.larrkmod.keychain.fallback", DISPATCH_QUEUE_SERIAL);
+    });
+    
+    dispatch_sync(fallbackQueue, ^{
+        NSMutableDictionary *fallback = LarrkLoadKeychainFallback();
+        NSString *key = LarrkKeyForItem(attrs);
+        fallback[key] = @{
+            @"data": data,
+            @"service": attrs[(__bridge id)kSecAttrService] ?: @"",
+            @"account": attrs[(__bridge id)kSecAttrAccount] ?: @"",
+            @"class": attrs[(__bridge id)kSecClass] ?: @"kSecClassGenericPassword"
+        };
+        LarrkSaveKeychainFallback(fallback);
+        NSLog(@"[LarrkMod] [KeychainFallback] Backed up session key '%@' (bytes: %lu) to keychain_fallback.plist", key, (unsigned long)data.length);
+    });
+}
+
+static OSStatus LarrkHandleKeychainCopyMatchingFallback(NSDictionary *query, CFTypeRef *result) {
+    NSString *service = query[(__bridge id)kSecAttrService];
+    NSString *account = query[(__bridge id)kSecAttrAccount];
+    NSString *secClass = query[(__bridge id)kSecClass] ?: (__bridge id)kSecClassGenericPassword;
+    
+    NSDictionary *fallback = LarrkLoadKeychainFallback();
+    if (!fallback || fallback.count == 0) {
+        return errSecItemNotFound;
+    }
+    
+    NSString *targetKey = LarrkKeyForItem(query);
+    NSDictionary *item = fallback[targetKey];
+    
+    if (!item) {
+        for (NSString *key in fallback) {
+            NSDictionary *entry = fallback[key];
+            if (![entry isKindOfClass:[NSDictionary class]]) continue;
+            
+            BOOL matchService = (!service || [entry[@"service"] isEqualToString:service]);
+            BOOL matchAccount = (!account || [entry[@"account"] isEqualToString:account]);
+            
+            if (matchService && matchAccount) {
+                item = entry;
+                break;
+            }
+        }
+    }
+    
+    if (!item && service.length > 0) {
+        for (NSString *key in fallback) {
+            NSDictionary *entry = fallback[key];
+            if ([entry[@"service"] containsString:service] || [service containsString:entry[@"service"]]) {
+                item = entry;
+                break;
+            }
+        }
+    }
+    
+    if (item) {
+        NSData *data = item[@"data"];
+        if (data) {
+            if (result != NULL) {
+                BOOL returnData = [query[(__bridge id)kSecReturnData] boolValue];
+                BOOL returnAttributes = [query[(__bridge id)kSecReturnAttributes] boolValue];
+                
+                if (returnAttributes && returnData) {
+                    NSMutableDictionary *resDict = [NSMutableDictionary dictionary];
+                    resDict[(__bridge id)kSecClass] = item[@"class"] ?: secClass;
+                    if (item[@"service"]) resDict[(__bridge id)kSecAttrService] = item[@"service"];
+                    if (item[@"account"]) resDict[(__bridge id)kSecAttrAccount] = item[@"account"];
+                    resDict[(__bridge id)kSecValueData] = data;
+                    *result = (__bridge_retained CFTypeRef)resDict;
+                } else if (returnAttributes) {
+                    NSMutableDictionary *resDict = [NSMutableDictionary dictionary];
+                    resDict[(__bridge id)kSecClass] = item[@"class"] ?: secClass;
+                    if (item[@"service"]) resDict[(__bridge id)kSecAttrService] = item[@"service"];
+                    if (item[@"account"]) resDict[(__bridge id)kSecAttrAccount] = item[@"account"];
+                    *result = (__bridge_retained CFTypeRef)resDict;
+                } else {
+                    *result = (__bridge_retained CFTypeRef)data;
+                }
+            }
+            NSLog(@"[LarrkMod] [KeychainFallback] Resolved item from fallback plist with errSecSuccess!");
+            return errSecSuccess;
+        }
+    }
+    
+    return errSecItemNotFound;
 }
 
 static OSStatus hooked_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
-    if (attributes) {
-        CFDictionaryRef clean = LarrkCleanKeychainDictionary(attributes);
-        OSStatus status = orig_SecItemAdd ? orig_SecItemAdd(clean, result) : errSecSuccess;
-        if (clean) CFRelease(clean);
-        return status;
-    }
-    return orig_SecItemAdd ? orig_SecItemAdd(attributes, result) : errSecParam;
-}
-
-static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    if (query) {
-        CFDictionaryRef clean = LarrkCleanKeychainDictionary(query);
-        OSStatus status = orig_SecItemCopyMatching ? orig_SecItemCopyMatching(clean, result) : errSecItemNotFound;
-        if (clean) CFRelease(clean);
-        return status;
-    }
-    return orig_SecItemCopyMatching ? orig_SecItemCopyMatching(query, result) : errSecParam;
-}
-
-static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
-    CFDictionaryRef cleanQuery = query ? LarrkCleanKeychainDictionary(query) : NULL;
-    CFDictionaryRef cleanAttrs = attributesToUpdate ? LarrkCleanKeychainDictionary(attributesToUpdate) : NULL;
+    if (!attributes) return orig_SecItemAdd ? orig_SecItemAdd(attributes, result) : errSecParam;
     
-    OSStatus status = orig_SecItemUpdate ? orig_SecItemUpdate(cleanQuery ?: query, cleanAttrs ?: attributesToUpdate) : errSecSuccess;
+    NSDictionary *attrDict = (__bridge NSDictionary *)attributes;
+    NSMutableDictionary *mutableAttrs = [attrDict mutableCopy];
     
-    if (cleanQuery) CFRelease(cleanQuery);
-    if (cleanAttrs) CFRelease(cleanAttrs);
+    // 1. Strip Access Group to prevent -34018
+    [mutableAttrs removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+    [mutableAttrs removeObjectForKey:@"agrp"];
+    
+    // 2. Override Accessible attribute for jailed compatibility
+    [mutableAttrs setObject:(__bridge id)kSecAttrAccessibleAfterFirstUnlock forKey:(__bridge id)kSecAttrAccessible];
+    
+    // 3. Always store to local persistent fallback plist
+    LarrkStoreKeychainFallback(mutableAttrs);
+    
+    OSStatus status = errSecSuccess;
+    if (orig_SecItemAdd) {
+        status = orig_SecItemAdd((__bridge CFDictionaryRef)mutableAttrs, result);
+    } else {
+        status = errSecItemNotFound;
+    }
+    
+    // Handle duplicate item by updating it
+    if (status == errSecDuplicateItem) {
+        NSMutableDictionary *query = [NSMutableDictionary dictionary];
+        if (mutableAttrs[(__bridge id)kSecClass]) query[(__bridge id)kSecClass] = mutableAttrs[(__bridge id)kSecClass];
+        if (mutableAttrs[(__bridge id)kSecAttrService]) query[(__bridge id)kSecAttrService] = mutableAttrs[(__bridge id)kSecAttrService];
+        if (mutableAttrs[(__bridge id)kSecAttrAccount]) query[(__bridge id)kSecAttrAccount] = mutableAttrs[(__bridge id)kSecAttrAccount];
+        
+        NSMutableDictionary *updateAttrs = [mutableAttrs mutableCopy];
+        [updateAttrs removeObjectForKey:(__bridge id)kSecClass];
+        
+        if (orig_SecItemUpdate) {
+            status = orig_SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)updateAttrs);
+        }
+    }
+    
+    // If keychain returned error (-34018 or other jailed Keychain issue), override to errSecSuccess!
+    if (status != errSecSuccess) {
+        NSLog(@"[LarrkMod] [KeychainFix] SecItemAdd returned error %d. Overriding to errSecSuccess via fallback plist!", (int)status);
+        if (result != NULL && mutableAttrs[(__bridge id)kSecReturnData]) {
+            *result = (__bridge_retained CFTypeRef)mutableAttrs[(__bridge id)kSecValueData];
+        }
+        return errSecSuccess;
+    }
+    
     return status;
 }
 
-static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
-    if (query) {
-        CFDictionaryRef clean = LarrkCleanKeychainDictionary(query);
-        OSStatus status = orig_SecItemDelete ? orig_SecItemDelete(clean) : errSecSuccess;
-        if (clean) CFRelease(clean);
-        return status;
+static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    if (!query) return orig_SecItemCopyMatching ? orig_SecItemCopyMatching(query, result) : errSecParam;
+    
+    NSDictionary *qDict = (__bridge NSDictionary *)query;
+    NSMutableDictionary *mutableQ = [qDict mutableCopy];
+    [mutableQ removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+    [mutableQ removeObjectForKey:@"agrp"];
+    
+    OSStatus status = errSecItemNotFound;
+    if (orig_SecItemCopyMatching) {
+        status = orig_SecItemCopyMatching((__bridge CFDictionaryRef)mutableQ, result);
     }
-    return orig_SecItemDelete ? orig_SecItemDelete(query) : errSecParam;
+    
+    // If keychain returned success and populated result, return it
+    if (status == errSecSuccess && (!result || *result != NULL)) {
+        return errSecSuccess;
+    }
+    
+    // If keychain failed or returned errSecItemNotFound / -34018, check fallback plist!
+    OSStatus fallbackStatus = LarrkHandleKeychainCopyMatchingFallback(mutableQ, result);
+    if (fallbackStatus == errSecSuccess) {
+        return errSecSuccess;
+    }
+    
+    return status;
+}
+
+static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
+    if (!query) return orig_SecItemUpdate ? orig_SecItemUpdate(query, attributesToUpdate) : errSecParam;
+    
+    NSMutableDictionary *cleanQuery = [(__bridge NSDictionary *)query mutableCopy];
+    [cleanQuery removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+    [cleanQuery removeObjectForKey:@"agrp"];
+    
+    NSMutableDictionary *cleanAttrs = attributesToUpdate ? [(__bridge NSDictionary *)attributesToUpdate mutableCopy] : nil;
+    if (cleanAttrs) {
+        [cleanAttrs removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+        [cleanAttrs removeObjectForKey:@"agrp"];
+        cleanAttrs[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
+    }
+    
+    OSStatus status = errSecSuccess;
+    if (orig_SecItemUpdate) {
+        status = orig_SecItemUpdate((__bridge CFDictionaryRef)cleanQuery, cleanAttrs ? (__bridge CFDictionaryRef)cleanAttrs : attributesToUpdate);
+    }
+    
+    // Update fallback plist
+    NSData *data = cleanAttrs[(__bridge id)kSecValueData];
+    if (data) {
+        NSMutableDictionary *merged = [cleanQuery mutableCopy];
+        [merged addEntriesFromDictionary:cleanAttrs];
+        LarrkStoreKeychainFallback(merged);
+    }
+    
+    return errSecSuccess;
+}
+
+static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
+    if (!query) return orig_SecItemDelete ? orig_SecItemDelete(query) : errSecParam;
+    
+    NSMutableDictionary *cleanQuery = [(__bridge NSDictionary *)query mutableCopy];
+    [cleanQuery removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
+    [cleanQuery removeObjectForKey:@"agrp"];
+    
+    if (orig_SecItemDelete) {
+        orig_SecItemDelete((__bridge CFDictionaryRef)cleanQuery);
+    }
+    
+    NSString *key = LarrkKeyForItem(cleanQuery);
+    NSMutableDictionary *fallback = LarrkLoadKeychainFallback();
+    [fallback removeObjectForKey:key];
+    LarrkSaveKeychainFallback(fallback);
+    
+    return errSecSuccess;
 }
 
 static void LarrkInstallKeychainFishhook(void) {
@@ -270,10 +535,10 @@ static void LarrkInstallKeychainFishhook(void) {
         {"SecItemDelete", (void *)hooked_SecItemDelete, (void **)&orig_SecItemDelete}
     };
     rebind_symbols(rebindings, sizeof(rebindings) / sizeof(struct rebinding));
-    NSLog(@"[LarrkMod] [KeychainFix] Keychain C functions successfully rebound via fishhook.");
+    NSLog(@"[LarrkMod] [KeychainFix] Keychain C functions successfully rebound via fishhook with persistent fallback.");
 }
 
-#pragma mark - 5. Built-in Bundle ID Spoofer
+#pragma mark - 4. Built-in Bundle ID Spoofer
 
 static IMP orig_NSBundle_bundleIdentifier = NULL;
 static NSString *hooked_NSBundle_bundleIdentifier(NSBundle *self, SEL _cmd) {
@@ -630,15 +895,15 @@ static void LarrkSetupNFTAndStarsHooks() {
     }
 }
 
-#pragma mark - 6. Safe Constructor Entry Point (Jailed iOS 18+ Clean Startup)
+#pragma mark - Constructor Entry Point (Jailed iOS 18+ Clean Startup)
 
 __attribute__((constructor))
 static void LarrkModInit(void) {
     NSLog(@"[LarrkMod] Initializing LarrkMod iOS Tweak (Jailed iOS 18.7.3 Sideload Engine)...");
     
     @autoreleasepool {
-        // STEP 1: Main Thread SIGABRT Protection (FCAlertView & NSBundle nil URLs/paths)
-        LarrkInstallBundleCrashFix();
+        // STEP 1: Main Thread SIGABRT Protection & Third-Party Ad Blocker (FCAlertView, iOSGods, ArmConverter)
+        LarrkInstallAdAndBundleFix();
         
         // STEP 2: AppGroup Container & NSUserDefaults Suite Redirection (Black Screen Fix)
         LarrkInstallSideloadFix();
@@ -646,7 +911,7 @@ static void LarrkModInit(void) {
         // STEP 3: Built-in Bundle ID Spoofer (app.swiftgram.ios.XYZ -> app.swiftgram.ios)
         LarrkInstallBundleIDSpoofer();
         
-        // STEP 4: Keychain Access Group Interception via Fishhook (No MSHookFunction)
+        // STEP 4: Keychain Access Group Interception & Persistent Fallback via Fishhook (No MSHookFunction)
         LarrkInstallKeychainFishhook();
         
         // STEP 5: Initialize persistent configuration
